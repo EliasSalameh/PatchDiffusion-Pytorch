@@ -91,6 +91,19 @@ python scripts/image_train.py --data_dir path/to/images $MODEL_FLAGS $DIFFUSION_
 
 We trained our models for a relatively short duration: our ImageNet models trained for a combined 32 V-100 days (approximately), while our FFHQ model trained for roughly 14 V-100 days. Our LSUN models trained for about 5 V-100 days each. In general, longer training is recommended if you have the budget for it - it improves results.
 
+# Training for DuDoDp-MAR
+
+512x512 "clean" images were used for training to replicate [DuDoDp-MAR paper](https://arxiv.org/html/2308.16742v2) pipeline.
+
+We train our images using DuDoDp's model. Their trained weights can be found on [DuDoDp-MAR repository](https://github.com/DeepXuan/DuDoDp-MAR/tree/main)
+```
+MODEL_FLAGS="--image_size 512  --num_channels 128 --num_res_blocks 2  --patch_size 4 --learn_sigma True --use_scale_shift_norm True --use_new_attention_order True --num_head_channels 64 --channel_mult 1,1,2,2,4 --in_channels=1"
+TRAIN_FLAGS="--lr 1e-4 --batch_size 16 --fp16_scale_growth 1.0e-3"
+DIFFUSION_FLAGS="--diffusion_steps 1000 --noise_schedule linear"
+python scripts/image_train.py --data_dir /mnt/a/Elias/rec_mcfly_mar/ $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS --resume_checkpoint /mnt/a/Elias/DuDoDp-MAR/model150000.pt
+```
+After training your model, head to [DuDoDp-MAR Elias Fork](https://github.com/EliasSalameh/DuDoDp-MAR) to test it on images with metal artifacts.
+
 # Acknowledgements:
 
 Our repository builds on top of ADM's [guided diffusion](https://github.com/openai/guided-diffusion) repository - Thanks for sharing!
