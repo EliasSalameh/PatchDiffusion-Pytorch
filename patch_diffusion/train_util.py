@@ -16,7 +16,7 @@ from .resample import LossAwareSampler, UniformSampler
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
 # 20-21 within the first ~1K steps of training.
-INITIAL_LOG_LOSS_SCALE = 20.0
+INITIAL_LOG_LOSS_SCALE = 20.0 # 20.0
 
 
 class TrainLoop:
@@ -91,7 +91,7 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
-            self.use_ddp = True
+            self.use_ddp = True # True
             self.ddp_model = DDP(
                 self.model,
                 device_ids=[dist_util.dev()],
@@ -122,7 +122,7 @@ class TrainLoop:
                     )
                 )
 
-        dist_util.sync_params(self.model.parameters())
+        # dist_util.sync_params(self.model.parameters())
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -158,6 +158,9 @@ class TrainLoop:
             or self.step + self.resume_step < self.lr_anneal_steps
         ):
             batch, cond = next(self.data)
+            batch = batch.squeeze(0)
+            for k,v in cond.items():
+                cond[k] = v.squeeze(0)
             self.run_step(batch, cond)
             if self.step % self.log_interval == 0:
                 logger.dumpkvs()

@@ -31,6 +31,7 @@ def main():
 
     logger.log("creating data loader...")
     data = load_data(
+        dataset_name='',
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         image_size=args.image_size,
@@ -73,7 +74,8 @@ def create_argparser():
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
-        weight_schedule="sqrt_snr"
+        weight_schedule="sqrt_snr",
+        in_channels=3
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

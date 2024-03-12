@@ -3,9 +3,9 @@ import inspect
 
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
-from .unet import SuperResModel, UNetModel, EncoderUNetModel
+from .unet import SuperResModel, UNetModel, EncoderUNetModel, SinoUnet, SinoMLP
 
-NUM_CLASSES = 1000
+NUM_CLASSES = 1000 # 1000
 
 def diffusion_defaults():
     """
@@ -47,7 +47,10 @@ def model_and_diffusion_defaults():
     Defaults for image training - which includes using patching (p=4) and classifier-free guidance.
     """
     res = dict(
+        model_name='Unet',
+        sino_size=641,
         image_size=64,
+        in_channels=3,
         num_channels=128,
         num_res_blocks=2,
         num_heads=4,
@@ -57,6 +60,7 @@ def model_and_diffusion_defaults():
         channel_mult="",
         dropout=0.0,
         class_cond=False,
+        view_cond=False,
         use_checkpoint=False,
         use_scale_shift_norm=True,
         resblock_updown=False,
@@ -66,7 +70,17 @@ def model_and_diffusion_defaults():
         patch_size=4,
         classifier_free=True,
         snr_splits="",
-        weight_schedule="sqrt_snr"
+        weight_schedule="sqrt_snr",
+
+        img_size=None,
+        p_size=None,
+        in_chans=None,
+        embed_dim=None,
+        depth=None,
+        n_heads=None,
+        mlp_ratio=None,
+        qkv_bias=None,
+        qk_scale=None
 
     )
     res.update(diffusion_defaults())
@@ -80,45 +94,63 @@ def classifier_and_diffusion_defaults():
 
 
 def create_model_and_diffusion(
-    image_size,
-    class_cond,
-    learn_sigma,
-    num_channels,
-    num_res_blocks,
+    model_name=None,
+    sino_size=None,
+    image_size=None,
+    in_channels=None,
+    class_cond=None,
+    view_cond=None,
+    learn_sigma=None,
+    num_channels=None,
+    num_res_blocks=None,
 
-    patch_size,
-    classifier_free,
+    patch_size=None,
+    classifier_free=None,
 
-    channel_mult,
-    num_heads,
-    num_head_channels,
-    num_heads_upsample,
-    attention_resolutions,
-    dropout,
-    diffusion_steps,
-    noise_schedule,
-    timestep_respacing,
-    use_kl,
-    model_mean_type,
-    rescale_timesteps,
-    rescale_learned_sigmas,
-    use_checkpoint,
-    use_scale_shift_norm,
-    resblock_updown,
-    use_fp16,
-    use_new_attention_order,
-    snr_splits,
-    weight_schedule
+    channel_mult=None,
+    num_heads=None,
+    num_head_channels=None,
+    num_heads_upsample=None,
+    attention_resolutions=None,
+    dropout=None,
+    diffusion_steps=None,
+    noise_schedule=None,
+    timestep_respacing=None,
+    use_kl=None,
+    model_mean_type=None,
+    rescale_timesteps=None,
+    rescale_learned_sigmas=None,
+    use_checkpoint=None,
+    use_scale_shift_norm=None,
+    resblock_updown=None,
+    use_fp16=None,
+    use_new_attention_order=None,
+    snr_splits=None,
+    weight_schedule=None,
+
+    img_size=None,
+    p_size=None,
+    in_chans=None,
+    embed_dim=None,
+    depth=None,
+    n_heads=None,
+    mlp_ratio=None,
+    qkv_bias=None,
+    qk_scale=None
 ):
     model = create_model(
-        image_size,
-        num_channels,
-        num_res_blocks,
-        patch_size,
-        classifier_free,
+        model_name=model_name,
+        sino_size=sino_size,
+        image_size=image_size,
+        in_channels=in_channels,
+        num_channels=num_channels,
+        num_res_blocks=num_res_blocks,
+        patch_size=patch_size,
+        classifier_free=classifier_free,
         channel_mult=channel_mult,
         learn_sigma=learn_sigma,
         class_cond=class_cond,
+        view_cond=view_cond,
         use_checkpoint=use_checkpoint,
         attention_resolutions=attention_resolutions,
         num_heads=num_heads,
@@ -129,6 +161,16 @@ def create_model_and_diffusion(
         resblock_updown=resblock_updown,
         use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
+
+        img_size=img_size,
+        p_size=p_size,
+        in_chans=in_chans,
+        embed_dim=embed_dim,
+        depth=depth,
+        n_heads=n_heads,
+        mlp_ratio=mlp_ratio,
+        qkv_bias=qkv_bias,
+        qk_scale=qk_scale,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -146,7 +188,10 @@ def create_model_and_diffusion(
 
 
 def create_model(
+    model_name,
+    sino_size,
     image_size, #real image size, not the dimensions of the image after patches have been extracted.
+    in_channels,
     num_channels,
     num_res_blocks,
 
@@ -156,6 +201,7 @@ def create_model(
     channel_mult="",
     learn_sigma=False,
     class_cond=False,
+    view_cond=False,
     use_checkpoint=False,
     attention_resolutions="16",
     num_heads=1,
@@ -166,6 +212,16 @@ def create_model(
     resblock_updown=False,
     use_fp16=False,
     use_new_attention_order=False,
+
+    img_size=None,
+    p_size=None,
+    in_chans=None,
+    embed_dim=None,
+    depth=None,
+    n_heads=None,
+    mlp_ratio=None,
+    qkv_bias=None,
+    qk_scale=None
 ):
     assert image_size%patch_size == 0, "patch size must evenly divide image size."
 
@@ -190,28 +246,90 @@ def create_model(
     attention_ds = []
     for res in attention_resolutions.split(","):
         attention_ds.append(input_res // int(res))
-
-    return UNetModel(
-        image_size=image_size,
-        in_channels=3,
-        model_channels=num_channels,
-        out_channels=(3 if not learn_sigma else 6),
-        num_res_blocks=num_res_blocks,
-        attention_resolutions=tuple(attention_ds),
-        dropout=dropout,
-        channel_mult=channel_mult,
-        patch_size=patch_size,
-        classifier_free=classifier_free,
-        num_classes=(NUM_CLASSES if class_cond else None),
-        use_checkpoint=use_checkpoint,
-        use_fp16=use_fp16,
-        num_heads=num_heads,
-        num_head_channels=num_head_channels,
-        num_heads_upsample=num_heads_upsample,
-        use_scale_shift_norm=use_scale_shift_norm,
-        resblock_updown=resblock_updown,
-        use_new_attention_order=use_new_attention_order,
-    )
+    if model_name == 'Unet':
+        return UNetModel(
+            image_size=image_size,
+            in_channels=in_channels, # 3
+            model_channels=num_channels,
+            out_channels=(in_channels if not learn_sigma else in_channels*2), # 3, 6
+            num_res_blocks=num_res_blocks,
+            attention_resolutions=tuple(attention_ds),
+            dropout=dropout,
+            channel_mult=channel_mult,
+            patch_size=patch_size,
+            classifier_free=classifier_free,
+            num_classes=(NUM_CLASSES if class_cond else None),
+            view_cond=view_cond,
+            use_checkpoint=use_checkpoint,
+            use_fp16=use_fp16,
+            num_heads=num_heads,
+            num_head_channels=num_head_channels,
+            num_heads_upsample=num_heads_upsample,
+            use_scale_shift_norm=use_scale_shift_norm,
+            resblock_updown=resblock_updown,
+            use_new_attention_order=use_new_attention_order,
+        )
+    elif model_name == 'SinoUnet':
+        return SinoUnet(
+            sino_size=sino_size,
+            image_size=image_size,
+            in_channels=in_channels, # 3
+            model_channels=num_channels,
+            out_channels=(in_channels if not learn_sigma else in_channels*2), # 3, 6
+            num_res_blocks=num_res_blocks,
+            attention_resolutions=tuple(attention_ds),
+            dropout=dropout,
+            channel_mult=channel_mult,
+            patch_size=patch_size,
+            classifier_free=classifier_free,
+            num_classes=(NUM_CLASSES if class_cond else None),
+            view_cond=view_cond,
+            use_checkpoint=use_checkpoint,
+            use_fp16=use_fp16,
+            num_heads=num_heads,
+            num_head_channels=num_head_channels,
+            num_heads_upsample=num_heads_upsample,
+            use_scale_shift_norm=use_scale_shift_norm,
+            resblock_updown=resblock_updown,
+            use_new_attention_order=use_new_attention_order,
+        )
+    elif model_name == 'SinoMLP':
+        return SinoMLP(
+            sino_size=sino_size,
+            image_size=image_size,
+            in_channels=in_channels, # 3
+            model_channels=num_channels,
+            out_channels=(in_channels if not learn_sigma else in_channels*2), # 3, 6
+            num_res_blocks=num_res_blocks,
+            attention_resolutions=tuple(attention_ds),
+            dropout=dropout,
+            channel_mult=channel_mult,
+            patch_size=patch_size,
+            classifier_free=classifier_free,
+            num_classes=(NUM_CLASSES if class_cond else None),
+            view_cond=view_cond,
+            use_checkpoint=use_checkpoint,
+            use_fp16=use_fp16,
+            num_heads=num_heads,
+            num_head_channels=num_head_channels,
+            num_heads_upsample=num_heads_upsample,
+            use_scale_shift_norm=use_scale_shift_norm,
+            resblock_updown=resblock_updown,
+            use_new_attention_order=use_new_attention_order,
+        )
+    elif model_name == 'UViTSino':
+        from .uvit import UViTSino
+        return UViTSino(img_size=(640, 641), in_chans=1, out_chans=(in_channels if not learn_sigma else in_channels*2),
+                         embed_dim=1024, depth=20, num_heads=16, mlp_ratio=4., qkv_bias=False, qk_scale=None)
+    elif model_name == 'UViT':
+        from .uvit import UViT
+        return UViT(out_chans=(in_channels if not learn_sigma else in_channels*2), embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
+                 qkv_bias=False, qk_scale=None) # 3, 6)
+    elif model_name == 'UViTSinoSlice':
+        from .uvit import UViTSinoSlice
+        return UViTSinoSlice(img_size=img_size, patch_size=p_size, in_chans=in_chans, out_chans=(in_channels if not learn_sigma else in_channels*2),  
+                             embed_dim=embed_dim, depth=depth, num_heads=n_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=None if qk_scale=='None' else qk_scale)
+        # return UViTSinoSlice(out_chans=(in_channels if not learn_sigma else in_channels*2))
 
 
 def create_classifier_and_diffusion(
@@ -483,9 +601,20 @@ def add_dict_to_argparser(parser, default_dict):
             v_type = str2bool
         parser.add_argument(f"--{k}", default=v, type=v_type)
 
+def add_dict_to_dict(add_dict, default_dict):
+    for k, v in default_dict.items():
+        if k in add_dict.keys():
+            continue
+        else:
+            add_dict[k] = v
+    return add_dict
+
 
 def args_to_dict(args, keys):
     return {k: getattr(args, k) for k in keys}
+
+def dict_to_dict(args, keys):
+    return {k: args[k] for k in keys}
 
 
 def str2bool(v):

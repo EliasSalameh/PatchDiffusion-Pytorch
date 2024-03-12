@@ -16,7 +16,8 @@ from .nn import (
     zero_module,
     normalization,
     timestep_embedding,
-    timestep_embedding_2d
+    timestep_embedding_2d,
+    view_embedding
 )
 
 
@@ -501,6 +502,7 @@ class UNetModel(nn.Module):
         conv_resample=True,
         dims=2,
         num_classes=None,
+        view_cond=False,
         use_checkpoint=False,
         use_fp16=False,
         num_heads=1,
@@ -532,6 +534,7 @@ class UNetModel(nn.Module):
         self.channel_mult = channel_mult
         self.conv_resample = conv_resample
         self.num_classes = num_classes
+        self.view_cond = view_cond
         self.use_checkpoint = use_checkpoint
         self.dtype = th.float16 if use_fp16 else th.float32
         self.num_heads = num_heads
@@ -546,7 +549,10 @@ class UNetModel(nn.Module):
             self.label_embs = nn.Embedding(nc, class_emb_channels)
         else:
             class_emb_channels = None
-            
+
+        if self.view_cond:
+            class_emb_channels = int(channel_mult[0] * model_channels)
+      
         time_embed_dim = int(model_channels * channel_mult[-1]) #our imagenet model used a smaller time embedding dim because we used model splitting - we thought that smaller timestep ranges didn't need as many dims.
         
         self.time_embed = nn.Sequential(
@@ -555,6 +561,14 @@ class UNetModel(nn.Module):
             linear(model_channels * 4, time_embed_dim),
             nn.SiLU()
         )
+
+        if self.view_cond:
+            self.view_embed = nn.Sequential(
+                linear(model_channels, model_channels * 4),
+                nn.SiLU(),
+                linear(model_channels * 4, model_channels),
+                nn.SiLU()
+            )
 
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
@@ -734,7 +748,7 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps, y=None, view=None):
         """
         Apply the model to an input batch.
 
@@ -749,15 +763,23 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
+        assert (view is not None) == (
+            self.view_cond
+        ), "must specify v if and only if the model is view-conditional"
+
         hs = []
         t_emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))#.type(self.dtype)
-
+            
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             c_emb = self.label_embs(y)
             emb = (c_emb, t_emb)
         else:
             emb = t_emb
+
+        if self.view_cond:
+            v_emb = self.view_embed(view_embedding(view, self.model_channels))#.type(self.dtype)
+            emb = (v_emb, t_emb)
 
         x_dtype = x.dtype
         x = self.input_blocks[0](x.type(self.dtype), emb)
@@ -813,6 +835,90 @@ class UNetModel(nn.Module):
             raise RuntimeError("You are trying to get the unconditional label for a model that wasn't trained with classifier-free guidance.")
         
         return (th.ones_like(y) * self.num_classes).type(y.dtype)
+    
+
+class SinoUnet(UNetModel):
+    def __init__(self, sino_size, image_size, in_channels, *args, **kwargs):
+        super().__init__(image_size, in_channels, *args, **kwargs)
+        self.sino_size = sino_size
+
+    def fc_in(self, x):
+        net = nn.Linear(self.sino_size, self.image_size**2*self.in_channels).to(x.device)
+        return net(x)
+    
+    def fc_out(self, x):
+        net = nn.Linear(self.image_size**2*self.in_channels, self.sino_size).to(x.device)
+        return net(x)
+
+    def forward(self, x, timesteps, **kwargs):
+        B = x.shape[0]
+        input_unet = self.fc_in(x)
+        input_unet = input_unet.reshape(B, self.in_channels, self.image_size, self.image_size)
+        output_unet = super().forward(input_unet, timesteps, **kwargs)
+        if self.learn_sigma:
+            output_unet = output_unet.reshape(B, 2, self.image_size**2*self.in_channels)
+        else:
+            output_unet = output_unet.reshape(B, 1, self.image_size**2*self.in_channels)
+        output = self.fc_out(output_unet)
+        return output
+
+class MLP(nn.Module):
+
+    def __init__(self, in_dim, out_dim, hidden_list):
+        super().__init__()
+        layers = []
+        lastv = in_dim
+        for hidden in hidden_list:
+            layers.append(nn.Linear(lastv, hidden))
+            layers.append(nn.ReLU())
+            lastv = hidden
+        layers.append(nn.Linear(lastv, out_dim))
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        shape = x.shape[:-1]
+        x = self.layers(x.view(-1, x.shape[-1]))
+        return x.view(*shape, -1)
+
+class SinoMLP(MLP):
+    def __init__(self, sino_size, *args, **kwargs):
+        super().__init__(sino_size+3, sino_size*2, [1024, 1024, 1024, 1024, 1024])
+        self.sino_size = sino_size
+
+    def forward(self, x, timesteps, **kwargs):
+        B = x.shape[0]
+        timesteps = (timesteps / 1000.) * 2 - 1
+        conds = []
+        for k,v in kwargs.items():
+            conds.append(v)
+        input = th.cat([x.squeeze(), timesteps.unsqueeze(-1)]+conds, dim=-1)
+        output = super().forward(input)
+        return output.view(B, 2, self.sino_size)
+
+# class SinoMLP(MLP):
+#     def __init__(self, sino_size, *args, **kwargs):
+#         self.neighbor = 5
+#         super().__init__(4+2*self.neighbor, 1, [256, 256])
+#         self.sino_size = sino_size
+
+#     def forward(self, x, timesteps, **kwargs):
+#         B = x.shape[0]
+        
+#         timesteps = (timesteps / 1000.) * 2 - 1
+#         conds = []
+#         for k,v in kwargs.items():
+#             v = th.cat([v]*self.sino_size, dim=0)
+#             conds.append(v)
+#         x_neighbors = [x.view(-1, 1)]
+#         for i in range(self.neighbor):
+#             x_neighbors.append(th.roll(x, i+1, -1).view(-1, 1))
+#             x_neighbors.append(th.roll(x, -i-1, -1).view(-1, 1))
+#         x_neighbor = th.cat(x_neighbors, dim=-1)
+#         timesteps = th.cat([timesteps.unsqueeze(-1)]*self.sino_size, dim=0)
+#         input = th.cat([x_neighbor, timesteps]+conds, dim=-1)
+#         output = super().forward(input)
+#         return output.view(B, self.sino_size, 1).permute(0,2,1)
+
 
 class SuperResModel(UNetModel):
     """

@@ -148,6 +148,18 @@ def timestep_embedding_2d(tens, dim, resolution):
     emb = th.cat([emb_x, emb_y], dim=-1)
     return emb[None, ...].to(tens.device).float().permute(0, 3, 1, 2)
 
+def view_embedding(view, dim, max_period=10000):
+    # view is like (sin, cos)
+    half = dim // 2
+    v1 = th.cat([view[:, 0].unsqueeze(-1)]*half, dim=-1)
+    v2 = th.cat([view[:, 1].unsqueeze(-1)]*half, dim=-1)
+    embedding = th.cat([v1, v2], dim=-1) 
+
+    if dim % 2:
+        embedding = th.cat([embedding, th.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
+
 def checkpoint(func, inputs, params, flag):
     """
     Evaluate a function without caching intermediate activations, allowing for
